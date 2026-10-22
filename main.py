@@ -206,11 +206,15 @@ class BilibiliPolluterPlugin(Star):
             if not group_id or not umo:
                 return
 
-            # 如果是新群，自动记录
-            if group_id not in self.bound_groups:
+            # 每次收到群消息时刷新 UMO：避免 unique_session 或配置变化导致旧绑定失效。
+            # QQ 官方的群会话场景缓存在 AstrBot 核心进程内，重启后的首次群消息也会重新建立该缓存。
+            previous_umo = self.bound_groups.get(group_id)
+            if previous_umo != umo:
                 self.bound_groups[group_id] = umo
-                await self.store.save("bound_groups", self.bound_groups)
-                logger.info(f"✅ 自动记录新群: {group_id}")
+                if await self.store.save("bound_groups", self.bound_groups):
+                    logger.info(f"群会话绑定{'更新' if previous_umo else '新增'}: {group_id}, umo={umo}")
+                else:
+                    logger.error(f"群会话绑定保存失败: {group_id}")
 
         except Exception as e:
             logger.error(f"自动记录群失败: {e}")
@@ -514,9 +518,16 @@ class BilibiliPolluterPlugin(Star):
                     return
                 send_attempt_count += 1
                 try:
+                    # AstrBot QQOfficial v4.26.2 在缺失 msg_id / scene 时可能仅记录
+                    # "No cached msg_id ... skip send_by_session" 并正常返回，
+                    # 因此此处只代表发送接口调用完成，不代表 QQ 已投递。
+                    logger.info(f"尝试群推送: group={group_id}, umo={umo}")
                     await self.context.send_message(umo, message_chain)
                     send_success_count += 1
-                    logger.info(f"已发送到群 {group_id}")
+                    logger.info(
+                        f"群推送接口已返回: group={group_id}（尚未确认 QQ 实际投递；"
+                        "如出现 No cached msg_id 则表示核心适配器已跳过发送）"
+                    )
                 except Exception as e:
                     logger.error(f"发送到群 {group_id} 失败: {e}")
                 # 群之间延迟
@@ -524,7 +535,7 @@ class BilibiliPolluterPlugin(Star):
 
         tasks = [send_to_group(gid, umo) for gid, umo in target_groups.items()]
         await asyncio.gather(*tasks, return_exceptions=True)
-        logger.info(f"本次群推送成功发送到 {send_success_count} 个群")
+        logger.info(f"本次群推送调用完成 {send_success_count} 个群（不等于实际投递成功）")
         return send_success_count, send_attempt_count
 
     # ==================== 核心流程 ====================
